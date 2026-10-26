@@ -73,15 +73,15 @@ Built using modern web technologies, this project establishes the foundation for
 
 ### Landing Page
 
-![SOMS Landing Page](screenshots/landing-page.png)
+![SOMS Landing Page](src/screenshots/landing-page.png)
 
 ### Student Dashboard
 
-![Student Dashboard](screenshots/student-dashboard.png)
+![Student Dashboard](src/screenshots/student-dashboard.png)
 
 ### Administrative Staff Dashboard
 
-![Staff Dashboard](screenshots/staff-dashboard.png)
+![Staff Dashboard](src/screenshots/staff-dashboard.png)
 
 ## 🛠️ Tech Stack
 
