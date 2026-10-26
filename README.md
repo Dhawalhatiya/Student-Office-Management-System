@@ -69,6 +69,20 @@ Built using modern web technologies, this project establishes the foundation for
 - Demo data seeding for testing.
 - API routes and server-side application logic.
 
+### 📸 Screenshots
+
+### Landing Page
+
+![SOMS Landing Page](screenshots/landing-page.png)
+
+### Student Dashboard
+
+![Student Dashboard](screenshots/student-dashboard.png)
+
+### Administrative Staff Dashboard
+
+![Staff Dashboard](screenshots/staff-dashboard.png)
+
 ## 🛠️ Tech Stack
 
 | Technology | Purpose |
