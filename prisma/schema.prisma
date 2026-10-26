@@ -1,0 +1,542 @@
+// Student Office Management System - Avantika University (academic demo)
+//
+// Local dev uses SQLite. To run on PostgreSQL, change `provider` to "postgresql"
+// and DATABASE_URL to a PostgreSQL connection string. No other changes needed:
+// money is stored as whole rupees (Int), JSON is stored as String, and enums
+// are native Prisma enums.
+
+generator client {
+  provider      = "prisma-client-js"
+  engineType    = "client"
+  previewFeatures = ["queryCompiler", "driverAdapters"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------- enums
+
+enum Role {
+  STUDENT
+  STAFF
+}
+
+// Internal permission groups inside the single "Administrative Staff" role.
+// Permissions for each are defined in src/lib/permissions.ts.
+enum StaffRole {
+  STUDENT_OFFICE
+  FINANCE
+  EXAMINATION
+  ACADEMIC
+}
+
+enum EnrollmentStatus {
+  ACTIVE
+  ON_LEAVE
+  SUSPENDED
+  WITHDRAWN
+  GRADUATED
+}
+
+enum FeeStatus {
+  UNPAID
+  PARTIAL
+  PAID
+}
+
+enum PaymentStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum ResultStatus {
+  DRAFT
+  UNDER_REVIEW
+  APPROVED
+  PUBLISHED
+}
+
+enum RequestStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  WAITING_FOR_STUDENT
+  RESOLVED
+  CLOSED
+}
+
+enum RequestCategory {
+  FEE_QUERY
+  RESULT_QUERY
+  DOCUMENT_REQUEST
+  PROFILE_CORRECTION
+  ENROLLMENT_VERIFICATION
+  SCHOLARSHIP
+  CERTIFICATE_REQUEST
+  GENERAL_QUERY
+  OTHER
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum DocumentStatus {
+  UPLOADED
+  UNDER_REVIEW
+  VERIFIED
+  REJECTED
+  REPLACEMENT_REQUIRED
+}
+
+enum ScholarshipStatus {
+  IN_PROGRESS
+  SUBMITTED
+  VERIFIED
+  REJECTED
+}
+
+enum NotificationType {
+  REQUEST_SUBMITTED
+  REQUEST_ASSIGNED
+  REQUEST_STATUS_CHANGED
+  INFO_REQUIRED
+  REQUEST_RESOLVED
+  REQUEST_CLOSED
+  FEE_REMINDER
+  RESULT_PUBLISHED
+  DOCUMENT_VERIFIED
+  DOCUMENT_REJECTED
+  SCHOLARSHIP_UPDATE
+  ANNOUNCEMENT
+}
+
+enum ExportFormat {
+  XLSX
+  PDF
+}
+
+enum ExportSource {
+  MANUAL
+  AI_ASSISTANT
+}
+
+// ---------------------------------------------------------------- identity
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         Role
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  staffProfile  StaffProfile?
+  student       Student?
+  sessions      Session[]
+  notifications Notification[]
+  auditLogs     AuditLog[]     @relation("AuditActor")
+  assignedRequests StudentRequest[] @relation("RequestAssignee")
+  requestMessages  RequestMessage[]
+  exportLogs    ReportExportLog[]
+
+  @@index([role])
+}
+
+model StaffProfile {
+  id          String    @id @default(cuid())
+  userId      String    @unique
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  staffRole   StaffRole
+  designation String
+}
+
+// Opaque session tokens. Only a SHA-256 hash of the token is stored.
+model Session {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  ip         String?
+  userAgent  String?
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------- institution
+
+model Department {
+  id         String      @id @default(cuid())
+  code       String      @unique
+  name       String
+  programmes Programme[]
+  students   Student[]
+}
+
+model Programme {
+  id                String     @id @default(cuid())
+  code              String     @unique
+  name              String
+  departmentId      String
+  department        Department @relation(fields: [departmentId], references: [id])
+  durationSemesters Int
+  students          Student[]
+
+  @@index([departmentId])
+}
+
+model AcademicYear {
+  id        String   @id @default(cuid())
+  label     String   @unique // e.g. "2025-26"
+  startDate DateTime
+  endDate   DateTime
+  isCurrent Boolean  @default(false)
+
+  semesters    Semester[]
+  students     Student[]
+  feeRecords   FeeRecord[]
+  results      Result[]
+  scholarships Scholarship[]
+}
+
+model Semester {
+  id             String       @id @default(cuid())
+  number         Int
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  results        Result[]
+
+  @@unique([academicYearId, number])
+}
+
+model Student {
+  id               String           @id @default(cuid())
+  userId           String           @unique
+  user             User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  enrollmentNo     String           @unique
+  fullName         String
+  dateOfBirth      DateTime
+  phone            String
+  address          String?
+  departmentId     String
+  department       Department       @relation(fields: [departmentId], references: [id])
+  programmeId      String
+  programme        Programme        @relation(fields: [programmeId], references: [id])
+  admissionYear    Int // batch
+  currentSemester  Int
+  academicYearId   String
+  academicYear     AcademicYear     @relation(fields: [academicYearId], references: [id])
+  enrollmentStatus EnrollmentStatus @default(ACTIVE)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  feeRecords           FeeRecord[]
+  results              Result[]
+  requests             StudentRequest[]
+  documents            Document[]
+  studentScholarships  StudentScholarship[]
+
+  @@index([fullName])
+  @@index([departmentId])
+  @@index([programmeId])
+  @@index([admissionYear])
+  @@index([currentSemester])
+  @@index([enrollmentStatus])
+}
+
+// ---------------------------------------------------------------- fees
+// Fee record (what is owed)  !=  fee status (derived from verified payments)
+// !=  payment transaction (money received)  !=  receipt (generated document).
+
+model FeeRecord {
+  id             String       @id @default(cuid())
+  studentId      String
+  student        Student      @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  description    String
+  totalAmount    Int // whole rupees
+  dueDate        DateTime
+  // Cached status. Only ever set by server code from VERIFIED payments.
+  status         FeeStatus    @default(UNPAID)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  payments FeePayment[]
+
+  @@index([studentId])
+  @@index([academicYearId])
+  @@index([status])
+}
+
+model FeePayment {
+  id           String        @id @default(cuid())
+  feeRecordId  String
+  feeRecord    FeeRecord     @relation(fields: [feeRecordId], references: [id], onDelete: Restrict)
+  amount       Int // whole rupees
+  paidAt       DateTime
+  reference    String        @unique
+  method       String
+  status       PaymentStatus @default(PENDING)
+  recordedById String?
+  verifiedById String?
+  verifiedAt   DateTime?
+  createdAt    DateTime      @default(now())
+
+  receipt FeeReceipt?
+
+  @@index([feeRecordId])
+  @@index([status])
+}
+
+model FeeReceipt {
+  id            String     @id @default(cuid())
+  receiptNo     String     @unique
+  paymentId     String     @unique
+  payment       FeePayment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  generatedAt   DateTime   @default(now())
+  generatedById String?
+}
+
+// ---------------------------------------------------------------- results
+// Lifecycle: DRAFT -> UNDER_REVIEW -> APPROVED -> PUBLISHED.
+// Student-facing queries must always filter status = PUBLISHED.
+
+model Result {
+  id            String       @id @default(cuid())
+  studentId     String
+  student       Student      @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  academicYearId String
+  academicYear  AcademicYear @relation(fields: [academicYearId], references: [id])
+  semesterId    String
+  semester      Semester     @relation(fields: [semesterId], references: [id])
+  status        ResultStatus @default(DRAFT)
+  sgpa          Float?
+  cgpa          Float?
+  publishedAt   DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  courses CourseResult[]
+
+  @@unique([studentId, semesterId])
+  @@index([status])
+  @@index([academicYearId])
+}
+
+model CourseResult {
+  id         String @id @default(cuid())
+  resultId   String
+  result     Result @relation(fields: [resultId], references: [id], onDelete: Cascade)
+  courseCode String
+  courseName String
+  credits    Int
+  marks      Int
+  maxMarks   Int    @default(100)
+  grade      String
+
+  @@index([resultId])
+}
+
+// ---------------------------------------------------------------- requests
+
+model StudentRequest {
+  id             String          @id @default(cuid())
+  ticketNo       String          @unique
+  studentId      String
+  student        Student         @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  category       RequestCategory
+  subject        String
+  description    String
+  priority       Priority        @default(MEDIUM)
+  status         RequestStatus   @default(SUBMITTED)
+  assignedToId   String?
+  assignedTo     User?           @relation("RequestAssignee", fields: [assignedToId], references: [id])
+  expectedBy     DateTime?
+  resolutionNote String?
+  resolvedAt     DateTime?
+  closedAt       DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  messages    RequestMessage[]
+  attachments RequestAttachment[]
+
+  @@index([studentId])
+  @@index([status])
+  @@index([priority])
+  @@index([category])
+  @@index([assignedToId])
+  @@index([createdAt])
+}
+
+model RequestMessage {
+  id         String         @id @default(cuid())
+  requestId  String
+  request    StudentRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  authorId   String
+  author     User           @relation(fields: [authorId], references: [id])
+  body       String
+  isInternal Boolean        @default(false) // staff-only note, never shown to students
+  createdAt  DateTime       @default(now())
+
+  @@index([requestId])
+}
+
+model RequestAttachment {
+  id           String         @id @default(cuid())
+  requestId    String
+  request      StudentRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  originalName String
+  storageKey   String // private storage key, never a public URL
+  mimeType     String
+  sizeBytes    Int
+  uploadedById String
+  createdAt    DateTime       @default(now())
+
+  @@index([requestId])
+}
+
+// ---------------------------------------------------------------- documents & scholarships
+
+model Document {
+  id           String         @id @default(cuid())
+  studentId    String
+  student      Student        @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  type         String
+  originalName String
+  storageKey   String? // null for fictional seed rows that have no stored file
+  mimeType     String?
+  sizeBytes    Int?
+  status       DocumentStatus @default(UPLOADED)
+  reviewNote   String?
+  reviewedById String?
+  reviewedAt   DateTime?
+  uploadedAt   DateTime       @default(now())
+
+  scholarshipDocuments ScholarshipDocument[]
+
+  @@index([studentId])
+  @@index([status])
+}
+
+model Scholarship {
+  id               String        @id @default(cuid())
+  name             String
+  academicYearId   String
+  academicYear     AcademicYear  @relation(fields: [academicYearId], references: [id])
+  eligibilityNotes String
+  isActive         Boolean       @default(true)
+  createdAt        DateTime      @default(now())
+
+  requirements        ScholarshipRequirement[]
+  studentScholarships StudentScholarship[]
+
+  @@index([academicYearId])
+}
+
+// Configurable per scholarship (not hard-coded in the application).
+model ScholarshipRequirement {
+  id           String      @id @default(cuid())
+  scholarshipId String
+  scholarship  Scholarship @relation(fields: [scholarshipId], references: [id], onDelete: Cascade)
+  documentType String
+  description  String?
+  isMandatory  Boolean     @default(true)
+
+  scholarshipDocuments ScholarshipDocument[]
+
+  @@unique([scholarshipId, documentType])
+}
+
+model StudentScholarship {
+  id            String            @id @default(cuid())
+  studentId     String
+  student       Student           @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  scholarshipId String
+  scholarship   Scholarship       @relation(fields: [scholarshipId], references: [id])
+  status        ScholarshipStatus @default(IN_PROGRESS)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  documents ScholarshipDocument[]
+
+  @@unique([studentId, scholarshipId])
+  @@index([status])
+}
+
+model ScholarshipDocument {
+  id                   String                 @id @default(cuid())
+  studentScholarshipId String
+  studentScholarship   StudentScholarship     @relation(fields: [studentScholarshipId], references: [id], onDelete: Cascade)
+  requirementId        String
+  requirement          ScholarshipRequirement @relation(fields: [requirementId], references: [id])
+  documentId           String?
+  document             Document?              @relation(fields: [documentId], references: [id])
+  status               DocumentStatus         @default(UPLOADED)
+  note                 String?
+
+  @@unique([studentScholarshipId, requirementId])
+}
+
+// ---------------------------------------------------------------- security & reporting
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation("AuditActor", fields: [actorId], references: [id])
+  action     String // e.g. LOGIN_SUCCESS, LOGIN_FAILED, ACCESS_DENIED, STUDENT_UPDATED
+  entityType String?
+  entityId   String?
+  summary    String // safe, human-readable; never contains secrets or full PII
+  metadata   String? // JSON string with old/new values for sensitive changes
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([actorId])
+  @@index([action])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  title     String
+  body      String
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  @@index([userId, readAt])
+  @@index([createdAt])
+}
+
+model ReportExportLog {
+  id          String       @id @default(cuid())
+  staffId     String
+  staff       User         @relation(fields: [staffId], references: [id])
+  source      ExportSource
+  format      ExportFormat
+  filters     String // JSON string of validated filters
+  recordCount Int
+  fileName    String?
+  createdAt   DateTime     @default(now())
+
+  @@index([staffId])
+  @@index([createdAt])
+}
